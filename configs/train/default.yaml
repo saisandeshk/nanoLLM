@@ -1,0 +1,12 @@
+# Training configuration
+output_dir: "outputs"
+batch_size: 24
+max_steps: 2000
+gradient_accumulation_steps: 4
+eval_every: 500
+eval_steps: 100
+muon_lr: 0.01
+weight_decay: 0.1
+grad_clip: 1.0
+use_amp: true
+seed: 42

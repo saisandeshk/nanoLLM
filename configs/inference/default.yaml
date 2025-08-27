@@ -1,0 +1,2 @@
+# Inference configuration
+model_path: "outputs/models/final_model.pt"

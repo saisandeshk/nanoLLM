@@ -1,5 +1,7 @@
+# configs/config.yaml
+
 defaults:
-  - model: nanoLLM_0.6B
-  - data: smolm
+  - model: nanoLLM_0.6B 
+  - data: smollm
   - train: default
   - inference: default

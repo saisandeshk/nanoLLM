@@ -1,15 +1,13 @@
-from .architecture.model import Qwen3Model
+from .architecture.model import nanoLLM
 from .config import ModelConfig
 from .data.tokenizer import Tokenizer
-from .data.dataset import TextTokenDataset
 from .training.trainer import Trainer
 from .inference.generate import Generator
 
 __all__ = [
-    "Qwen3Model",
+    "nanoLLM",
     "ModelConfig",
     "Tokenizer",
-    "TextTokenDataset",
     "Trainer",
     "Generator",
 ]

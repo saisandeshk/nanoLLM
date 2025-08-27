@@ -1,24 +1,26 @@
-from dataclasses import dataclass
-from typing import Optional
+# src/nanoLLM/config.py
 
-@dataclass
-class ModelConfig:
-    # Model architecture
-    model_type: str = "qwen3"
-    d_model: int = 384
-    n_heads: int = 8
-    n_layers: int = 6
-    d_ff: int = 1536
+from pydantic import BaseModel
+
+class ModelConfig(BaseModel):
+    model_type: str = "nanoLLM"
+    d_model: int = 1536
+    n_layers: int = 22
+    n_heads: int = 12
+    d_ff: int = 4096
     n_kv_heads: int = 4
-    sliding_window: int = 4096
     attention_bias: bool = False
-    rms_norm_eps: float = 1e-6
-    dropout: float = 0.1
+    rms_norm_eps: float = 1e-5
+    dropout: float = 0.0
     max_seq_len: int = 512
-    vocab_size: Optional[int] = None
-    
-    def __post_init__(self):
-        self.d_k = self.d_model // self.n_heads
-        assert self.d_model % self.n_heads == 0, "d_model must be divisible by n_heads"
-        assert self.n_heads % self.n_kv_heads == 0, "n_heads must be divisible by n_kv_heads"
-        self.n_kv_groups = self.n_heads // self.n_kv_heads
+    vocab_size: int = 32000
+
+    @property
+    def d_k(self) -> int:
+        """Dimension of the key/query vectors."""
+        return self.d_model // self.n_heads
+
+    @property
+    def n_kv_groups(self) -> int:
+        """Number of query heads per key/value head."""
+        return self.n_heads // self.n_kv_heads

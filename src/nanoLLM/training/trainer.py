@@ -1,184 +1,110 @@
-import os
+# src/nanoLLM/training/trainer.py
 import time
 import math
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
-from ..utils.config import set_seed
-from .optimizer import Muon, setup_muon_optimizer
-from .lr_scheduler import get_scheduler
+from .checkpoint import CheckpointManager
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, config, model_config):
+    def __init__(self, model, optimizer, scheduler, train_loader, val_loader, config, tracker):
         self.model = model
+        self.optimizer = optimizer
+        self.scheduler = scheduler
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.config = config  # Training config
-        self.model_config = model_config  # Model config (contains vocab_size)
+        self.config = config
+        self.tracker = tracker
+        
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = self.model.to(self.device)
+        self.model.to(self.device)
         
-        # Setup optimizers
-        self.optimizers = setup_muon_optimizer(self.model, config)
+        self.scaler = GradScaler(enabled=config.use_amp)
+        self.checkpoint_manager = CheckpointManager(config.output_dir)
         
-        # Setup schedulers
-        self.schedulers = []
-        for optimizer in self.optimizers:
-            scheduler = get_scheduler(optimizer, config)
-            self.schedulers.append(scheduler)
-        
-        # Setup scaler for mixed precision
-        self.scaler = GradScaler('cuda') if config.use_amp else None
-        
-        # Create output directory
-        os.makedirs(config.output_dir, exist_ok=True)
-        
-        # Initialize tracking variables
         self.step = 0
         self.best_val_loss = float('inf')
-    
+
+    @torch.no_grad()
     def evaluate(self):
-        """Evaluate model performance"""
         self.model.eval()
         total_loss = 0
-        total_tokens = 0
-        total_correct = 0
-        
-        with torch.no_grad():
-            for i, batch in enumerate(self.val_loader):
-                if i >= self.config.eval_steps:
-                    break
-                
-                x = batch['input_ids'].to(self.device)
-                y = batch['labels'].to(self.device)
-                
-                with autocast(enabled=self.config.use_amp, device_type='cuda'):
-                    logits = self.model(x)
-                    loss = F.cross_entropy(logits.view(-1, self.model_config.vocab_size), y.view(-1))
-                
-                total_loss += loss.item() * y.numel()
-                total_tokens += y.numel()
-                predictions = logits.argmax(dim=-1)
-                total_correct += (predictions == y).sum().item()
-        
-        avg_loss = total_loss / total_tokens
-        accuracy = total_correct / total_tokens
-        perplexity = math.exp(min(avg_loss, 20))
+        pbar = tqdm(self.val_loader, desc="Evaluating", leave=False, total=self.config.eval_steps)
+        for i, batch in enumerate(pbar):
+            if i >= self.config.eval_steps:
+                break
+            
+            x, y = batch
+            x, y = x.to(self.device), y.to(self.device)
+            
+            with autocast(enabled=self.config.use_amp, device_type='cuda'):
+                logits = self.model(x)
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            
+            total_loss += loss.item()
         
         self.model.train()
-        return {'val_loss': avg_loss, 'val_accuracy': accuracy, 'val_perplexity': perplexity}
-    
-    def save_checkpoint(self, is_best=False):
-        """Save model checkpoint"""
-        checkpoint = {
-            'model_state_dict': self.model.state_dict(),
-            'config': self.config,
-            'model_config': self.model_config,
-            'step': self.step,
-            'optimizers': [opt.state_dict() for opt in self.optimizers],
-            'schedulers': [sched.state_dict() for sched in self.schedulers]
-        }
-        
-        if is_best:
-            torch.save(checkpoint, os.path.join(self.config.output_dir, 'best_model.pt'))
-            print(f"💾 Saved best model with val_loss: {self.best_val_loss:.4f}")
-        else:
-            torch.save(checkpoint, os.path.join(self.config.output_dir, 'final_model.pt'))
-            print(f"💾 Saved final model to final_model.pt")
-    
+        avg_loss = total_loss / self.config.eval_steps
+        return {"val_loss": avg_loss, "val_perplexity": math.exp(avg_loss)}
+
     def train(self):
-        """Train the model"""
-        print(f"\n🚀 Training model with Muon optimizer")
-        total_params = sum(p.numel() for p in self.model.parameters())
-        print(f"  📊 Total parameters: {total_params:,}")
-        
+        print(f"🚀 Starting training for {self.config.max_steps} steps...")
         self.model.train()
-        start_time = time.time()
+        
         pbar = tqdm(total=self.config.max_steps, desc="Training")
         
         while self.step < self.config.max_steps:
-            for batch_idx, batch in enumerate(self.train_loader):
+            for batch in self.train_loader:
                 if self.step >= self.config.max_steps:
                     break
                 
-                x = batch['input_ids'].to(self.device)
-                y = batch['labels'].to(self.device)
+                x, y = batch
+                x, y = x.to(self.device), y.to(self.device)
                 
-                # Forward pass with gradient accumulation
-                if self.config.use_amp:
-                    with autocast(device_type='cuda'):
+                # Forward and backward pass
+                for i in range(self.config.gradient_accumulation_steps):
+                    with autocast(enabled=self.config.use_amp, device_type='cuda'):
                         logits = self.model(x)
-                        loss = F.cross_entropy(logits.view(-1, self.model_config.vocab_size), y.view(-1))
+                        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
                         loss = loss / self.config.gradient_accumulation_steps
-                    self.scaler.scale(loss).backward()
-                else:
-                    logits = self.model(x)
-                    loss = F.cross_entropy(logits.view(-1, self.model_config.vocab_size), y.view(-1))
-                    loss = loss / self.config.gradient_accumulation_steps
-                    loss.backward()
-                
-                # Optimizer step after accumulation
-                if (self.step + 1) % self.config.gradient_accumulation_steps == 0:
-                    if self.config.use_amp:
-                        for optimizer in self.optimizers:
-                            self.scaler.unscale_(optimizer)
-                        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-                        for optimizer in self.optimizers:
-                            self.scaler.step(optimizer)
-                            optimizer.zero_grad()
-                        for scheduler in self.schedulers:
-                            scheduler.step()
-                        self.scaler.update()
-                    else:
-                        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-                        for optimizer in self.optimizers:
-                            optimizer.step()
-                            optimizer.zero_grad()
-                        for scheduler in self.schedulers:
-                            scheduler.step()
-                
-                # Logging
-                if self.step % 10 == 0:
-                    with torch.no_grad():
-                        predictions = logits.argmax(dim=-1)
-                        accuracy = (predictions == y).float().mean().item()
-                        current_loss = loss.item() * self.config.gradient_accumulation_steps
-                        perplexity = math.exp(min(current_loss, 20))
                     
-                    pbar.set_postfix({
-                        'loss': f'{current_loss:.4f}',
-                        'acc': f'{accuracy:.3f}',
-                        'ppl': f'{perplexity:.1f}',
-                        'lr': f'{self.optimizers[0].param_groups[0]["lr"]:.2e}'
-                    })
+                    self.scaler.scale(loss).backward()
+
+                # Optimizer step
+                if self.config.grad_clip > 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
                 
-                # Evaluation
-                if self.step % self.config.eval_every == 0 and self.step > 0:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+                self.scheduler.step()
+                
+                # Logging and evaluation
+                if self.step % 10 == 0:
+                    current_lr = self.scheduler.get_last_lr()[0]
+                    log_data = {
+                        "train_loss": loss.item() * self.config.gradient_accumulation_steps,
+                        "learning_rate": current_lr,
+                    }
+                    self.tracker.log(log_data, step=self.step)
+                    pbar.set_postfix({"loss": f"{log_data['train_loss']:.4f}", "lr": f"{current_lr:.2e}"})
+
+                if self.step > 0 and self.step % self.config.eval_every == 0:
                     eval_metrics = self.evaluate()
-                    print(f"\nStep {self.step}: Val Loss: {eval_metrics['val_loss']:.4f}, "
-                          f"Val Acc: {eval_metrics['val_accuracy']:.4f}, "
-                          f"Val PPL: {eval_metrics['val_perplexity']:.2f}")
+                    self.tracker.log(eval_metrics, step=self.step)
+                    print(f"\nStep {self.step}: Val Loss: {eval_metrics['val_loss']:.4f}, Val PPL: {eval_metrics['val_perplexity']:.2f}")
                     
                     if eval_metrics['val_loss'] < self.best_val_loss:
                         self.best_val_loss = eval_metrics['val_loss']
-                        self.save_checkpoint(is_best=True)
+                        self.checkpoint_manager.save(self.model, self.optimizer, self.scheduler, self.step, self.best_val_loss, is_best=True)
                 
                 self.step += 1
-                if self.step % 10 == 0:
-                    pbar.update(10)
-        
+                pbar.update(1)
+
         pbar.close()
-        training_time = time.time() - start_time
-        print(f"  ⏱️ Training completed in {training_time:.1f} seconds")
-        
-        # Final evaluation
-        final_eval = self.evaluate()
-        print(f"  📊 Final - Loss: {final_eval['val_loss']:.4f}, "
-              f"Acc: {final_eval['val_accuracy']:.4f}, PPL: {final_eval['val_perplexity']:.2f}")
-        
+        print("🎉 Training finished.")
         # Save final model
-        self.save_checkpoint()
-        
-        return self.model, final_eval
+        self.checkpoint_manager.save(self.model, self.optimizer, self.scheduler, self.step, self.best_val_loss)
+        self.tracker.finish()

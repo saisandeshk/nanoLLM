@@ -1,2 +1,15 @@
-# Inference configuration
-model_path: "outputs/models/final_model.pt"
+# configs/inference/default.yaml
+
+# Path to the model checkpoint relative to the project root.
+# 'best_model.pt' is usually what you want for inference.
+model_path: "outputs/best_model.pt"
+
+# (Optional) Provide a prompt here to run non-interactively.
+# If null, the script will start in interactive chat mode.
+# Example: prompt: "The future of artificial intelligence is"
+prompt: null
+
+# Generation parameters
+max_new_tokens: 150
+temperature: 0.7
+top_k: 40

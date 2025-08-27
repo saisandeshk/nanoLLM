@@ -1,13 +1,13 @@
-# Model configuration for 0.6B parameter model
-model_type: "qwen3"
-d_model: 384
-n_heads: 8
-n_layers: 6
-d_ff: 1536
+# configs/model/nanoLLM_0.6B.yaml
+
+model_type: "nanoLLM" # Let's rename from qwen3 to our own name
+d_model: 1536
+n_layers: 22
+n_heads: 12
+d_ff: 4096
 n_kv_heads: 4
-sliding_window: 4096
 attention_bias: false
-rms_norm_eps: 1e-6
-dropout: 0.1
+rms_norm_eps: 1e-5    # A slightly more stable epsilon 
+dropout: 0.0          # NOTE: Disabled dropout for pre-training 
 max_seq_len: 512
-vocab_size: 32000  # Default vocab size
+vocab_size: 32000

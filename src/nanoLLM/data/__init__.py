@@ -1,10 +1,10 @@
+# src/nanoLLM/data/__init__.py
 from .tokenizer import Tokenizer
-from .dataset import TextTokenDataset, load_and_cache_data
-from .collator import DataCollatorForLanguageModeling
+from .dataset import MemmapDataset
+from .collator import DataCollator
 
 __all__ = [
     "Tokenizer",
-    "TextTokenDataset",
-    "load_and_cache_data",
-    "DataCollatorForLanguageModeling",
+    "MemmapDataset",
+    "DataCollator",
 ]

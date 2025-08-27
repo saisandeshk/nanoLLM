@@ -1,28 +1,22 @@
+# src/nanoLLM/data/collator.py
 import torch
 from dataclasses import dataclass
+from typing import List, Tuple, Dict
 
 @dataclass
-class DataCollatorForLanguageModeling:
-    pad_token_id: int
-    
-    def __call__(self, features):
-        # features is a list of tuples (x, y) where x and y are tensors
-        input_ids = [f[0] for f in features]
-        labels = [f[1] for f in features]
+class DataCollator:
+    """
+    A simple data collator that takes a list of (input, target) tuples
+    and stacks them into batches.
+    """
+    def __call__(self, features: List[Tuple[torch.Tensor, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        # `features` is a list of (x, y) tuples from the dataset
         
-        # Pad input_ids and labels
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=self.pad_token_id
-        )
-        labels = torch.nn.utils.rnn.pad_sequence(
-            labels, batch_first=True, padding_value=-100  # Use -100 for labels to ignore in loss calculation
-        )
-        
-        # Create attention mask
-        attention_mask = (input_ids != self.pad_token_id).long()
+        # Stack the tensors from each tuple into a single batch tensor
+        input_ids = torch.stack([f[0] for f in features])
+        labels = torch.stack([f[1] for f in features])
         
         return {
             'input_ids': input_ids,
-            'attention_mask': attention_mask,
             'labels': labels
         }

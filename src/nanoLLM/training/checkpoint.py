@@ -1,31 +1,28 @@
+# src/nanoLLM/training/checkpoint.py
 import os
 import torch
 
-def save_checkpoint(model, optimizer, scheduler, config, epoch, global_step, output_dir, is_best=False):
-    """Save model checkpoint"""
-    checkpoint = {
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'config': config,
-        'epoch': epoch,
-        'global_step': global_step
-    }
-    
-    if is_best:
-        checkpoint_path = os.path.join(output_dir, 'best_model.pt')
-    else:
-        checkpoint_path = os.path.join(output_dir, f'checkpoint_epoch_{epoch}.pt')
-    
-    torch.save(checkpoint, checkpoint_path)
-    print(f"Checkpoint saved to {checkpoint_path}")
+class CheckpointManager:
+    def __init__(self, output_dir: str):
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
 
-def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
-    """Load model checkpoint"""
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    
-    return checkpoint.get('epoch', 0), checkpoint.get('global_step', 0)
+    def save(self, model, optimizer, scheduler, step: int, val_loss: float, is_best: bool = False):
+        state = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'step': step,
+            'val_loss': val_loss
+        }
+        
+        if is_best:
+            save_path = os.path.join(self.output_dir, 'best_model.pt')
+            torch.save(state, save_path)
+            print(f"💾 Saved best model checkpoint at step {step} to {save_path}")
+        
+        # Also save a final model checkpoint
+        final_path = os.path.join(self.output_dir, 'final_model.pt')
+        torch.save(state, final_path)
+
+    # load method can be added here if needed for resuming training

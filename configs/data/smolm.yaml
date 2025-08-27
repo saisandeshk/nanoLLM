@@ -1,9 +1,8 @@
-# Data configuration for SmolLM corpus
+# configs/data/smollm.yaml
+
 dataset_name: "HuggingFaceTB/smollm-corpus"
 dataset_subset: "cosmopedia-v2"
-tokenizer_output_dir: "data/tokenizer"
+tokenizer_output_dir: "data" # Save tokenizer.json in the root data folder
 max_seq_len: 512
-num_documents: 2000
-max_tokens: 500000
 cache_dir: "data_cache"
-vocab_size: 32000  # Default vocab size
+vocab_size: 32000 # Default vocab_size 

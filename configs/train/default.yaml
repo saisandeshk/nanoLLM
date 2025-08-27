@@ -1,12 +1,15 @@
-# Training configuration
+# configs/train/default.yaml
+
 output_dir: "outputs"
-batch_size: 24
-max_steps: 2000
-gradient_accumulation_steps: 4
-eval_every: 500
+batch_size: 8         # For a 600M model on a single GPU
+gradient_accumulation_steps: 16 # effective batch size (8 * 16 = 128)
+max_steps: 100000     
+eval_every: 1000      # Evaluate less frequently
 eval_steps: 100
-muon_lr: 0.01
+learning_rate: 3e-4   
 weight_decay: 0.1
 grad_clip: 1.0
-use_amp: true
+use_amp: true         # Automatic Mixed Precision is crucial for performance
 seed: 42
+warmup_steps: 2000 # Add this line
+wandb: true        # Add this line to enable W&B logging

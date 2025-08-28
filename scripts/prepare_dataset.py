@@ -6,30 +6,34 @@ from datasets import load_dataset
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import psutil
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Add src to the Python path
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from src.nanoLLM.data import Tokenizer
 
-def get_tokenizer(vocab_size, data_dir):
-    """Initializes and trains a tokenizer on the dataset."""
+def get_tokenizer(vocab_size, data_dir, num_docs_for_training):
+    """Initializes and trains a tokenizer on a subset of the dataset."""
     tokenizer_path = os.path.join(data_dir, "tokenizer.json")
     
     if os.path.exists(tokenizer_path):
-        print(f"Tokenizer already exists at {tokenizer_path}, loading it.")
+        print(f"✅ Tokenizer already exists at {tokenizer_path}, loading it.")
         tokenizer = Tokenizer.from_file(tokenizer_path)
     else:
-        print("Training a new tokenizer...")
+        print(f"⏳ Training a new tokenizer on {num_docs_for_training:,} documents...")
         tokenizer = Tokenizer(vocab_size=vocab_size)
-        # Create a Python generator to stream text data for training
         dataset = load_dataset("HuggingFaceTB/smollm-corpus", "cosmopedia-v2", split="train", streaming=True)
         
-        def text_iterator():
+        # MODIFICATION 2: Create a limited text iterator for training
+        def limited_text_iterator():
+            count = 0
             for example in dataset:
+                if count >= num_docs_for_training:
+                    break
                 yield example['text']
+                count += 1
         
-        tokenizer.train(text_iterator(), tokenizer_path)
+        tokenizer.train(limited_text_iterator(), tokenizer_path)
         
     return tokenizer
 
@@ -43,50 +47,65 @@ def tokenize_chunk(chunk, tokenizer, eos_token_id):
             tokens.extend(tokenizer.encode(text, add_special_tokens=False) + [eos_token_id])
     return tokens
 
-def process_and_save_split(split_name, tokenizer, data_dir, num_workers):
-    """Processes a single split of the dataset and saves it to a binary file."""
+def process_and_save_split(split_name, tokenizer, data_dir, num_workers, max_docs: int = 0):
+    """
+    Processes a single split, with an optional limit on the number of documents.
+    max_docs=0 means no limit.
+    """
     print(f"Processing '{split_name}' split...")
-    dataset = load_dataset("HuggingFaceTB/smollm-corpus", "cosmopedia-v2", split=split_name)
+    if max_docs > 0:
+        print(f"⚠️  Limiting to a maximum of {max_docs:,} documents.")
+        
+    dataset = load_dataset("HuggingFaceTB/smollm-corpus", "cosmopedia-v2", split=split_name, streaming=True)
     
     output_path = os.path.join(data_dir, f"{split_name}.bin")
     eos_token_id = tokenizer.eos_token_id
 
-    # Use ProcessPoolExecutor for parallel tokenization
+    # The rest of this function is from the "Killed" fix, with the added max_docs logic
     with ProcessPoolExecutor(max_workers=num_workers) as executor, open(output_path, "wb") as f:
-        # Create chunks of the dataset to distribute to workers
-        chunk_size = 1000  # Number of documents per chunk
+        chunk_size = 1000
         futures = []
-        chunk = []
-        for example in dataset:
-            chunk.append(example)
-            if len(chunk) == chunk_size:
-                futures.append(executor.submit(tokenize_chunk, chunk, tokenizer, eos_token_id))
-                chunk = []
-        if chunk:
-            futures.append(executor.submit(tokenize_chunk, chunk, tokenizer, eos_token_id))
-
-        # Setup rich progress bar
+        docs_processed = 0
+        
         progress = Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
-            "[progress.percentage]{task.percentage:>3.0f}%",
+            "[cyan]Docs processed: {task.completed:,}",
             TimeElapsedColumn(),
-            "ETA:",
-            TimeRemainingColumn(),
         )
         
-        total_tokens = 0
         with progress:
-            task = progress.add_task(f"[cyan]Tokenizing {split_name}...", total=len(futures))
-            for future in as_completed(futures):
+            task = progress.add_task(f"[cyan]Tokenizing {split_name}...", total=None)
+            
+            chunk = []
+            for example in dataset:
+                # --- THIS IS THE NEW LOGIC ---
+                if max_docs > 0 and docs_processed >= max_docs:
+                    break # Stop if we've reached the document limit
+                
+                chunk.append(example)
+                docs_processed += 1
+                
+                if len(chunk) == chunk_size:
+                    futures.append(executor.submit(tokenize_chunk, chunk, tokenizer, eos_token_id))
+                    chunk = []
+                    
+                    if len(futures) > num_workers * 2:
+                        tokens = futures.pop(0).result()
+                        if tokens:
+                            f.write(np.array(tokens, dtype=np.uint16).tobytes())
+                        progress.update(task, advance=chunk_size)
+
+            if chunk:
+                futures.append(executor.submit(tokenize_chunk, chunk, tokenizer, eos_token_id))
+
+            for future in futures:
                 tokens = future.result()
                 if tokens:
-                    # Write tokens to the binary file as uint16
                     f.write(np.array(tokens, dtype=np.uint16).tobytes())
-                    total_tokens += len(tokens)
-                progress.update(task, advance=1)
+                progress.update(task, advance=len(chunk) if len(chunk)<chunk_size else chunk_size) # Adjust for last chunk
 
-    print(f"Finished processing '{split_name}'. Total tokens: {total_tokens:,}")
+    print(f"Finished processing '{split_name}'. Total documents: {docs_processed:,}")
     print(f"Saved tokenized data to {output_path}")
 
 def main():
@@ -94,20 +113,26 @@ def main():
     parser.add_argument("--data_dir", type=str, default="data", help="Directory to save tokenizer and tokenized data.")
     parser.add_argument("--vocab_size", type=int, default=32000, help="Vocabulary size for the tokenizer.")
     parser.add_argument("--num_workers", type=int, default=max(1, psutil.cpu_count(logical=False) - 1), help="Number of worker processes for tokenization.")
-    args = parser.parse_args()
+    parser.add_argument("--tokenizer_docs", type=int, default=1_000_000, help="Number of documents to use for training the tokenizer.")
     
+    # --- MODIFICATION 2: Add the new argument for controlling FINAL dataset size ---
+    parser.add_argument(
+        "--max_docs", 
+        type=int, 
+        default=2_000_000, # A reasonable default for a quick test run.
+        help="Maximum number of documents to process for the final .bin files. Set to 0 for no limit."
+    )
+    
+    args = parser.parse_args()
     os.makedirs(args.data_dir, exist_ok=True)
     
-    # Step 1: Get or train the tokenizer
-    tokenizer = get_tokenizer(args.vocab_size, args.data_dir)
+    tokenizer = get_tokenizer(args.vocab_size, args.data_dir, args.tokenizer_docs)
     print(f"Tokenizer loaded with vocab size: {tokenizer.vocab_size}")
     
-    # Step 2: Process the 'train' and 'validation' splits
-    # Note: smollm-corpus only has 'train', so we'll just process that.
-    # In a real scenario, you would create a validation split.
-    process_and_save_split("train", tokenizer, args.data_dir, args.num_workers)
+    # --- MODIFICATION 3: Pass the new argument to the function ---
+    process_and_save_split("train", tokenizer, args.data_dir, args.num_workers, args.max_docs)
     
-    # As there is no validation split, we will create a small one from the end of the train split
+    # --- MODIFICATION 4: Make the validation split logic more robust ---
     print("Creating validation split from train data...")
     train_file = os.path.join(args.data_dir, "train.bin")
     val_file = os.path.join(args.data_dir, "validation.bin")
@@ -115,8 +140,9 @@ def main():
     with open(train_file, 'rb') as f_train:
         all_tokens = np.fromfile(f_train, dtype=np.uint16)
         
-    # Use last 5 million tokens for validation
-    val_split_size = 5_000_000
+    # Use 5% of the data for validation, but cap it at 5M tokens for very large runs
+    val_split_size = min(5_000_000, int(len(all_tokens) * 0.05))
+    
     train_tokens = all_tokens[:-val_split_size]
     val_tokens = all_tokens[-val_split_size:]
     

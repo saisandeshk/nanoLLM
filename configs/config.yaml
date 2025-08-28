@@ -2,6 +2,6 @@
 
 defaults:
   - model: nanoLLM_0.6B 
-  - data: smollm
+  - data: smolm
   - train: default
   - inference: default
